@@ -1,0 +1,124 @@
+import numpy as np
+import tensorflow as tf
+import cv2
+from PIL import Image
+from picamera2 import Picamera2, Preview
+from libcamera import controls
+import time
+import datetime
+import uuid
+from sense_hat import SenseHat  # Sense HAT library added
+
+class Model:
+    def __init__(self):
+        model_filepath = "/home/pi/Downloads/model.tflite"  # Adjust path if needed
+        self.interpreter = tf.lite.Interpreter(model_path=model_filepath)
+        self.interpreter.allocate_tensors()
+        self.input_details = self.interpreter.get_input_details()
+        self.output_details = self.interpreter.get_output_details()
+        assert len(self.input_details) == 1 and len(self.output_details) == 1
+        self.input_shape = self.input_details[0]['shape'][1:3]  # Extract height and width
+ 
+    def predict(self, image_filepath):
+        image = Image.open(image_filepath).resize(self.input_shape)
+        input_array = np.array(image, dtype=np.float32)[np.newaxis, :, :, :]
+        input_array = input_array[:, :, :, (2, 1, 0)]  # Convert to BGR
+        self.interpreter.set_tensor(self.input_details[0]['index'], input_array)
+        self.interpreter.invoke()
+        return {detail['name']: self.interpreter.get_tensor(detail['index']) for detail in self.output_details}
+
+# Load the labels from labels.txt
+with open("/home/pi/Downloads/labels.txt", "r") as f:  # Adjust path if needed
+    labels = [line.strip() for line in f.readlines()]
+
+def capture_image(cam):
+    try:
+        node = hex(uuid.getnode())  # Generate a unique identifier
+        cam.set_controls({"AfMode": controls.AfModeEnum.Continuous})
+        time.sleep(2)
+        start_time = time.time()
+        while time.time() - start_time < 10:
+            frame = cam.capture_array()
+            cv2.imshow("Camera Preview", frame)
+            if cv2.waitKey(1) == ord('q'):
+                break
+        t = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        image_path = f'/home/pi/Downloads/photo-{node}-{t}.jpg'  # Adjust path if needed
+        cam.capture_file(image_path)
+        cv2.destroyAllWindows()
+        time.sleep(1)
+        print(image_path)
+        return image_path
+    except Exception as e:
+        print(f"Error capturing image: {e}")
+        return None
+
+def predict_freshness(model, image_path):
+    try:
+        outputs = model.predict(image_path)
+        outputs = list(outputs.values())[0]
+        max_index = np.argmax(outputs[0])
+        tag = labels[max_index]
+        probability = outputs[0][max_index]
+        threshold = 0.5
+        if probability < threshold:
+            return None, probability
+        return tag, probability
+    except Exception as e:
+        print(f"Error predicting freshness: {e}")
+        return None, None
+
+def get_waste_color(waste_type):
+    waste_type = waste_type.lower()
+    if "beveragecartons" in waste_type:
+        return [255, 0, 0]    # Red
+    elif "cans" in waste_type:
+        return [255, 255, 0]  # Yellow
+    elif "foodwaste" in waste_type:
+        return [0, 0, 255]    # Blue
+    elif "glassbottle" in waste_type:
+        return [0, 255, 0]    # Green
+    elif "plastic" in waste_type:
+        return [0, 125, 125]    # Pink
+
+def main():
+    sense = SenseHat()  # Initialize the Sense HAT
+    model = Model()     # Load the model
+    cam = Picamera2()   # Create a camera object
+    cam.start()         # Start the camera
+
+    while True:
+        # Exercise 3: Add a welcome message with student ID
+        sense.show_message("Welcome! 12345678", scroll_speed=0.08, text_colour=[0, 0, 255])  # Blue text, replace 12345 with your student ID
+
+        # Exercise 1: Slow down scroll speed to 0.08 (originally 0.05)
+        sense.show_message("Press joystick to capture", scroll_speed=0.08, text_colour=[0, 255, 0])  # Green text
+
+        # Wait for joystick press
+        event = sense.stick.wait_for_event()
+        if event.action == "pressed" and event.direction == "middle":
+            image_path = capture_image(cam)  # Capture an image
+            if image_path:
+                tag, probability = predict_freshness(model, image_path)
+                if tag:
+                    message = f"{tag} {probability:.2f}"
+                    print(f"Detected: {message}")
+                      # Show Plastic-specific message
+                    sense.show_message(message, scroll_speed=0.08, text_colour=get_waste_color(tag))
+                # ... (rest of the main function remains the same)
+            
+                else:
+                    message = "No food item detected"
+                    print(message)
+                    # Exercise 1 & 2: Slow scroll speed to 0.08, change color to red [255, 0, 0]
+                    sense.show_message(message, scroll_speed=0.08, text_colour=[255, 0, 0])
+            else:
+                message = "Failed to capture image"
+                print(message)
+                # Exercise 1 & 2: Slow scroll speed to 0.08, change color to red [255, 0, 0]
+                sense.show_message(message, scroll_speed=0.08, text_colour=[255, 0, 0])
+
+    cam.stop()  # Stop the camera when done
+
+if __name__ == '__main__':
+    main()
